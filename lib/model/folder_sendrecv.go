@@ -26,6 +26,7 @@ import (
 	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
@@ -168,6 +169,9 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 // pull returns true if it manages to get all needed items from peers, i.e. get
 // the device in sync with the global state.
 func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
+	if err := domuneProbeRulesReady(f.Path); err != nil {
+		return false, err
+	}
 	f.sl.DebugContext(ctx, "Pulling")
 
 	scanChan := make(chan string)
@@ -339,7 +343,7 @@ loop:
 		}
 
 		switch {
-		case f.ignores.Match(file.Name).IsIgnored():
+		case f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored():
 			file.SetIgnored()
 			f.sl.DebugContext(ctx, "Handling ignored file", file.LogAttr())
 			dbUpdateChan <- dbUpdateJob{file, dbUpdateInvalidate}
@@ -551,6 +555,16 @@ func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions 
 
 // handleDir creates or updates the given directory
 func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+	lease, ruleErr := domuneLease(f.Path, f.ignores.Hash())
+	if ruleErr != nil {
+		f.newPullError(file.Name, ruleErr)
+		return
+	}
+	defer lease.Close()
+	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+
 	// Used in the defer closure below, updated by the function body. Take
 	// care not declare another err.
 	var err error
@@ -720,6 +734,16 @@ func (f *sendReceiveFolder) checkParent(file string, scanChan chan<- string) boo
 
 // handleSymlink creates or updates the given symlink
 func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+	lease, ruleErr := domuneLease(f.Path, f.ignores.Hash())
+	if ruleErr != nil {
+		f.newPullError(file.Name, ruleErr)
+		return
+	}
+	defer lease.Close()
+	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+
 	// Used in the defer closure below, updated by the function body. Take
 	// care not declare another err.
 	var err error
@@ -814,6 +838,16 @@ func (f *sendReceiveFolder) handleSymlinkCheckExisting(file protocol.FileInfo, s
 
 // deleteDir attempts to remove a directory that was deleted on a remote
 func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+	lease, ruleErr := domuneLease(f.Path, f.ignores.Hash())
+	if ruleErr != nil {
+		f.newPullError(file.Name, ruleErr)
+		return
+	}
+	defer lease.Close()
+	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+
 	// Used in the defer closure below, updated by the function body. Take
 	// care not declare another err.
 	var err error
@@ -872,6 +906,16 @@ func (f *sendReceiveFolder) deleteFile(file protocol.FileInfo, dbUpdateChan chan
 }
 
 func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, hasCur bool, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+	lease, ruleErr := domuneLease(f.Path, f.ignores.Hash())
+	if ruleErr != nil {
+		f.newPullError(file.Name, ruleErr)
+		return
+	}
+	defer lease.Close()
+	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+
 	// Used in the defer closure below, updated by the function body. Take
 	// care not declare another err.
 	var err error
@@ -958,6 +1002,16 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 // renameFile attempts to rename an existing file to a destination
 // and set the right attributes on it.
 func (f *sendReceiveFolder) renameFile(cur, source, target protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) error {
+	// The upstream shortcut moves the source before final validation. Use the
+	// normal generation-bound copy/pull path so refusal never consumes source data.
+	if domunerules.Enabled() {
+		return fmt.Errorf("use generation-bound normal pull")
+	}
+
+	if err := domuneProbeRulesReady(f.Path); err != nil {
+		return err
+	}
+
 	// Used in the defer closure below, updated by the function body. Take
 	// care not declare another err.
 	var err error
@@ -1165,6 +1219,7 @@ func (f *sendReceiveFolder) handleFile(ctx context.Context, file protocol.FileIn
 	})
 
 	s := newSharedPullerState(file, f.mtimefs, f.folderID, tempName, blocks, reused, f.IgnorePerms || file.NoPermissions, hasCurFile, curFile, !f.DisableSparseFiles, !f.DisableFsync)
+	s.ruleGeneration = f.ignores.Hash()
 
 	f.sl.DebugContext(ctx, "Handling file", slogutil.FilePath(file.Name), "blocksToCopy", len(blocks), "reused", len(reused))
 
@@ -1259,6 +1314,16 @@ func populateOffsets(blocks []protocol.BlockInfo) {
 // shortcutFile sets file metadata, when that's the only thing that has
 // changed.
 func (f *sendReceiveFolder) shortcutFile(file protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob) {
+	lease, ruleErr := domuneLease(f.Path, f.ignores.Hash())
+	if ruleErr != nil {
+		f.newPullError(file.Name, ruleErr)
+		return
+	}
+	defer lease.Close()
+	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+
 	f.sl.Debug("Taking metadata shortcut", slogutil.FilePath(file.Name))
 
 	f.evLogger.Log(events.ItemStarted, map[string]string{
@@ -1471,6 +1536,13 @@ func (f *sendReceiveFolder) copyBlockFromFolder(ctx context.Context, folderID st
 // Returns true when the block was successfully copied.
 // The passed buffer must be large enough to accommodate the block.
 func (f *sendReceiveFolder) copyBlockFromFile(ctx context.Context, srcName string, srcOffset int64, state copyBlocksState, ffs fs.Filesystem, block protocol.BlockInfo, buf []byte) bool {
+	lease, ruleErr := domuneLease(f.Path, state.ruleGeneration)
+	if ruleErr != nil {
+		state.fail(ruleErr)
+		return false
+	}
+	defer lease.Close()
+
 	fd, err := ffs.Open(srcName)
 	if err != nil {
 		f.sl.DebugContext(ctx, "Failed to open source file for block copy", slogutil.FilePath(srcName), "blockHash", block.Hash, slogutil.Error(err))
@@ -1494,6 +1566,10 @@ func (f *sendReceiveFolder) copyBlockFromFile(ctx context.Context, srcName strin
 		}
 	}
 
+	if err := lease.Check(); err != nil {
+		state.fail(err)
+		return false
+	}
 	dstFd, err := state.tempFile()
 	if err != nil {
 		// State is already marked as failed when an error is returned here.
@@ -1569,6 +1645,14 @@ func (f *sendReceiveFolder) pullerRoutine(ctx context.Context, in <-chan pullBlo
 }
 
 func (f *sendReceiveFolder) pullBlock(ctx context.Context, state pullBlockState, out chan<- *sharedPullerState) {
+	lease, err := domuneLease(f.Path, state.ruleGeneration)
+	if err != nil {
+		state.fail(err)
+		out <- state.sharedPullerState
+		return
+	}
+	defer lease.Close()
+
 	// Get an fd to the temporary file. Technically we don't need it until
 	// after fetching the block, but if we run into an error here there is
 	// no point in issuing the request to the network.
@@ -1650,6 +1734,10 @@ loop:
 			continue
 		}
 
+		if err := lease.Check(); err != nil {
+			state.fail(err)
+			break
+		}
 		// Save the block data we got from the cluster
 		err = f.limitedWriteAt(ctx, fd, buf, state.block.Offset)
 		if err != nil {
@@ -1663,6 +1751,15 @@ loop:
 }
 
 func (f *sendReceiveFolder) performFinish(file, curFile protocol.FileInfo, hasCurFile bool, tempName string, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) error {
+	lease, err := domuneLease(f.Path, f.ignores.Hash())
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return fmt.Errorf("rule excluded final write")
+	}
+
 	// Set the correct permission bits on the new file
 	if !f.IgnorePerms && !file.NoPermissions {
 		if err := f.mtimefs.Chmod(tempName, fs.FileMode(file.Permissions&0o777)); err != nil {
@@ -1675,6 +1772,11 @@ func (f *sendReceiveFolder) performFinish(file, curFile protocol.FileInfo, hasCu
 		return fmt.Errorf("setting metadata: %w", err)
 	}
 
+	// Check before any destructive finalization; a later refusal after deleting
+	// the old file would itself lose data. The lease drains managed updates.
+	if err := lease.Check(); err != nil {
+		return err
+	}
 	if stat, err := f.mtimefs.Lstat(file.Name); err == nil {
 		// There is an old file or directory already in place. We need to
 		// handle that.
@@ -1723,6 +1825,9 @@ func (f *sendReceiveFolder) finisherRoutine(ctx context.Context, in <-chan *shar
 
 			f.queue.Done(state.file.Name)
 
+			if err == nil && state.ruleGeneration != f.ignores.Hash() {
+				err = fmt.Errorf("stale final-write generation")
+			}
 			if err == nil {
 				err = f.performFinish(state.file, state.curFile, state.hasCurFile, state.tempName, dbUpdateChan, scanChan)
 			}
@@ -2011,7 +2116,7 @@ func (f *sendReceiveFolder) deleteDirOnDiskHandleChildren(dir string, scanChan c
 		if err != nil {
 			return err
 		}
-		switch match := f.ignores.Match(path); {
+		switch match := f.ignores.MatchEntry(path, info.IsDir()); {
 		case match.IsDeletable():
 			if info.IsDir() {
 				dirsToDelete = append(dirsToDelete, path)

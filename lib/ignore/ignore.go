@@ -121,6 +121,10 @@ type ChangeDetector interface {
 }
 
 type Matcher struct {
+	git            *gitRules
+	gitRoot        string
+	gitAncestors   []GitRule
+	gitEnabled     bool
 	fs             fs.Filesystem
 	lines          []string  // exact lines read from .stignore
 	patterns       []Pattern // patterns including those from included files
@@ -142,7 +146,8 @@ func WithChangeDetector(cd ChangeDetector) Option {
 
 func New(fs fs.Filesystem, opts ...Option) *Matcher {
 	m := &Matcher{
-		fs: fs,
+		fs:         fs,
+		gitEnabled: os.Getenv("DOMUNE_GITIGNORE") == "1" || os.Getenv("DOMUNE_RULES_DIR") != "",
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -158,6 +163,9 @@ func New(fs fs.Filesystem, opts ...Option) *Matcher {
 // parsed. In this case the contents of the file are nonetheless available
 // in the Lines() method.
 func (m *Matcher) Load(file string) error {
+	if m.gitEnabled {
+		return m.loadGit()
+	}
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
@@ -229,6 +237,11 @@ func (m *Matcher) Match(file string) ignoreresult.R {
 
 	m.mut.Lock()
 	defer m.mut.Unlock()
+
+	if m.gitEnabled {
+		info, err := m.fs.Lstat(file)
+		return m.gitMatchLocked(file, err == nil && info.IsDir())
+	}
 
 	if len(m.patterns) == 0 {
 		return ignoreresult.NotIgnored

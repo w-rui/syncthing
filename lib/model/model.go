@@ -36,6 +36,7 @@ import (
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
+	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
@@ -1897,6 +1898,11 @@ func (m *model) Closed(conn protocol.Connection, err error) {
 	}
 	if len(remainingConns) == 0 {
 		// All device connections closed
+		for _, cfg := range m.folderCfgs {
+			if cfg.SharedWith(deviceID) {
+				domunerules.Invalidate(cfg.Path)
+			}
+		}
 		delete(m.deviceConnIDs, deviceID)
 		delete(m.promotedConnID, deviceID)
 		delete(m.connRequestLimiters, deviceID)
@@ -1988,6 +1994,30 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 		return nil, protocol.ErrGeneric
 	}
 
+	if err := domuneProbeRulesReady(folderCfg.Path); err != nil {
+		return nil, err
+	}
+
+	lease, leaseErr := domuneLease(folderCfg.Path, folderIgnores.Hash())
+	if leaseErr != nil {
+		return nil, leaseErr
+	}
+	defer func() {
+		if err == nil {
+			if checkErr := lease.Check(); checkErr != nil {
+				if out != nil {
+					out.Close()
+				}
+				out = nil
+				err = checkErr
+			}
+		}
+		if out == nil {
+			lease.Close()
+		} else {
+			out = &domuneResponse{RequestResponse: out, lease: lease}
+		}
+	}()
 	// Make sure the path is valid and in canonical form
 	if name, err := fs.Canonicalize(req.Name); err != nil {
 		l.Debugf("Request from %s in folder %q for invalid filename %s", deviceID.Short(), req.Folder, req.Name)
@@ -3484,3 +3514,10 @@ func without[E comparable, S ~[]E](s S, e E) S {
 	}
 	return s
 }
+
+type domuneResponse struct {
+	protocol.RequestResponse
+	lease *domunerules.Lease
+}
+
+func (r *domuneResponse) Close() { r.RequestResponse.Close(); r.lease.Close() }

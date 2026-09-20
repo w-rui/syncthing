@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "/domune/schemas/sync-rule-context.schema.json",
+  "title": "SyncRuleContext",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "root", "logicalRoot", "generation", "ancestors", "controls"],
+  "properties": {
+    "version": { "const": "domune-sync-rules/v1" },
+    "root": { "type": "string", "minLength": 1 },
+    "logicalRoot": { "type": "string" },
+    "generation": { "type": "string", "minLength": 1 },
+    "ancestors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope", "content"],
+        "properties": { "scope": { "type": "string" }, "content": { "type": "string" } }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "required": [".gitignore", ".syncignore"],
+      "properties": {
+        ".gitignore": { "type": ["string", "null"] },
+        ".syncignore": { "type": "string" }
+      },
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}

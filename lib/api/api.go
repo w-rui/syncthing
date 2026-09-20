@@ -48,8 +48,10 @@ import (
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
 	"github.com/syncthing/syncthing/lib/discover"
+	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
+	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/locations"
 	"github.com/syncthing/syncthing/lib/model"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -254,36 +256,38 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/cluster/pending/folders", s.getPendingFolders) // [device]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/completion", s.getDBCompletion)             // [device] [folder]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/file", s.getDBFile)                         // folder file
-	restMux.HandlerFunc(http.MethodGet, "/rest/db/ignores", s.getDBIgnores)                   // folder
-	restMux.HandlerFunc(http.MethodGet, "/rest/db/need", s.getDBNeed)                         // folder [perpage] [page]
-	restMux.HandlerFunc(http.MethodGet, "/rest/db/remoteneed", s.getDBRemoteNeed)             // device folder [perpage] [page]
-	restMux.HandlerFunc(http.MethodGet, "/rest/db/localchanged", s.getDBLocalChanged)         // folder [perpage] [page]
-	restMux.HandlerFunc(http.MethodGet, "/rest/db/status", s.getDBStatus)                     // folder
-	restMux.HandlerFunc(http.MethodGet, "/rest/db/browse", s.getDBBrowse)                     // folder [prefix] [dirsonly] [levels]
-	restMux.HandlerFunc(http.MethodGet, "/rest/folder/versions", s.getFolderVersions)         // folder
-	restMux.HandlerFunc(http.MethodGet, "/rest/folder/errors", s.getFolderErrors)             // folder [perpage] [page]
-	restMux.HandlerFunc(http.MethodGet, "/rest/folder/pullerrors", s.getFolderErrors)         // folder (deprecated)
-	restMux.HandlerFunc(http.MethodGet, "/rest/events", s.getIndexEvents)                     // [since] [limit] [timeout] [events]
-	restMux.HandlerFunc(http.MethodGet, "/rest/events/disk", s.getDiskEvents)                 // [since] [limit] [timeout]
-	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/health", s.getHealth)                   // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/stats/device", s.getDeviceStats)               // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/stats/folder", s.getFolderStats)               // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/svc/deviceid", s.getDeviceID)                  // id
-	restMux.HandlerFunc(http.MethodGet, "/rest/svc/lang", s.getLang)                          // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/svc/report", s.getReport)                      // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/svc/random/string", s.getRandomString)         // [length]
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/browse", s.getSystemBrowse)             // current
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/connections", s.getSystemConnections)   // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/discovery", s.getSystemDiscovery)       // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/error", s.getSystemError)               // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/paths", s.getSystemPaths)               // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/ping", s.restPing)                      // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/status", s.getSystemStatus)             // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/upgrade", s.getSystemUpgrade)           // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/version", s.getSystemVersion)           // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)           // -
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                   // [since]
-	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/domune/rules", s.getDomuneRules)
+	restMux.HandlerFunc(http.MethodPost, "/rest/domune/rules", s.postDomuneRules)
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/ignores", s.getDBIgnores)                 // folder
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/need", s.getDBNeed)                       // folder [perpage] [page]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/remoteneed", s.getDBRemoteNeed)           // device folder [perpage] [page]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/localchanged", s.getDBLocalChanged)       // folder [perpage] [page]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/status", s.getDBStatus)                   // folder
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/browse", s.getDBBrowse)                   // folder [prefix] [dirsonly] [levels]
+	restMux.HandlerFunc(http.MethodGet, "/rest/folder/versions", s.getFolderVersions)       // folder
+	restMux.HandlerFunc(http.MethodGet, "/rest/folder/errors", s.getFolderErrors)           // folder [perpage] [page]
+	restMux.HandlerFunc(http.MethodGet, "/rest/folder/pullerrors", s.getFolderErrors)       // folder (deprecated)
+	restMux.HandlerFunc(http.MethodGet, "/rest/events", s.getIndexEvents)                   // [since] [limit] [timeout] [events]
+	restMux.HandlerFunc(http.MethodGet, "/rest/events/disk", s.getDiskEvents)               // [since] [limit] [timeout]
+	restMux.HandlerFunc(http.MethodGet, "/rest/noauth/health", s.getHealth)                 // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/stats/device", s.getDeviceStats)             // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/stats/folder", s.getFolderStats)             // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/svc/deviceid", s.getDeviceID)                // id
+	restMux.HandlerFunc(http.MethodGet, "/rest/svc/lang", s.getLang)                        // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/svc/report", s.getReport)                    // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/svc/random/string", s.getRandomString)       // [length]
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/browse", s.getSystemBrowse)           // current
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/connections", s.getSystemConnections) // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/discovery", s.getSystemDiscovery)     // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/error", s.getSystemError)             // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/paths", s.getSystemPaths)             // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/ping", s.restPing)                    // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/status", s.getSystemStatus)           // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/upgrade", s.getSystemUpgrade)         // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/version", s.getSystemVersion)         // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)         // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                 // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)          // [since]
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
@@ -1999,4 +2003,60 @@ type bufferedResponseWriter struct {
 func (w bufferedResponseWriter) WriteHeader(int) {}
 func (w bufferedResponseWriter) Header() http.Header {
 	return http.Header{}
+}
+
+func (s *service) getDomuneRules(w http.ResponseWriter, r *http.Request) {
+	cfg, ok := s.cfg.Folders()[r.URL.Query().Get("folder")]
+	if !ok {
+		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	var excluded *bool
+	matchedGeneration := ""
+	if name := r.URL.Query().Get("path"); name != "" {
+		matcher := ignore.New(cfg.Filesystem())
+		if err := matcher.Load(".gitignore"); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		matchedGeneration = matcher.Hash()
+		value := matcher.MatchEntry(name, false).IsIgnored()
+		excluded = &value
+	}
+	lease, err := domunerules.Acquire(cfg.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	defer lease.Close()
+	if excluded != nil && matchedGeneration != lease.Generation() {
+		http.Error(w, "rule generation changed during exclusion check", http.StatusConflict)
+		return
+	}
+	if !domunerules.Enabled() {
+		http.Error(w, "Domune rules disabled", http.StatusServiceUnavailable)
+		return
+	}
+	sendJSON(w, map[string]any{"generation": lease.Generation(), "requestGeneration": lease.RequestGeneration(), "ready": true, "excluded": excluded})
+}
+func (s *service) postDomuneRules(w http.ResponseWriter, r *http.Request) {
+	cfg, ok := s.cfg.Folders()[r.URL.Query().Get("folder")]
+	if !ok {
+		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	if !cfg.Paused {
+		http.Error(w, "pause folder before replacing rules", http.StatusConflict)
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := domunerules.Apply(cfg.Path, data); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.getDomuneRules(w, r)
 }

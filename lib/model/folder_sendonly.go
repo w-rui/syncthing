@@ -53,7 +53,7 @@ func (f *sendOnlyFolder) pull(ctx context.Context) (bool, error) {
 			return false, err
 		}
 
-		if f.ignores.Match(file.FileName()).IsIgnored() {
+		if f.ignores.MatchEntry(file.FileName(), file.IsDirectory()).IsIgnored() {
 			file.SetIgnored()
 			batch.Append(file)
 			l.Debugln(f, "Handling ignored file", file)

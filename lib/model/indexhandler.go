@@ -17,7 +17,10 @@ import (
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/itererr"
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
+	"github.com/syncthing/syncthing/lib/fs"
+	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/ur/contract"
@@ -26,6 +29,7 @@ import (
 type indexHandler struct {
 	conn                     protocol.Connection
 	downloads                *deviceDownloadState
+	folderRoot               string
 	folder                   string
 	folderIsReceiveEncrypted bool
 	evLogger                 events.Logger
@@ -132,6 +136,7 @@ func newIndexHandler(conn protocol.Connection, downloads *deviceDownloadState, f
 		conn:                     conn,
 		downloads:                downloads,
 		folder:                   folder.ID,
+		folderRoot:               folder.Path,
 		folderIsReceiveEncrypted: folder.Type == config.FolderTypeReceiveEncrypted,
 		localPrevSequence:        startSequence,
 		sentPrevSequence:         startSequence,
@@ -258,10 +263,37 @@ func (s *indexHandler) pause() {
 // sendIndexTo sends file infos with a sequence number higher than prevSequence and
 // returns the highest sent sequence number.
 func (s *indexHandler) sendIndexTo(ctx context.Context) error {
+	if err := domuneProbeRulesReady(s.folderRoot); err != nil {
+		return err
+	}
+	var rules *ignore.Matcher
+	if domunerules.Enabled() {
+		rules = ignore.New(fs.NewFilesystem(fs.FilesystemTypeBasic, s.folderRoot))
+		if err := rules.Load(".gitignore"); err != nil {
+			return err
+		}
+	}
 	initial := s.localPrevSequence == 0
 	batch := NewFileInfoBatch(nil)
 	var batchError error
 	batch.SetFlushFunc(func(fs []protocol.FileInfo) error {
+		generation := ""
+		if rules != nil {
+			generation = rules.Hash()
+		}
+		lease, err := domuneLease(s.folderRoot, generation)
+		if err != nil {
+			return err
+		}
+		defer lease.Close()
+		if rules != nil {
+			for i := range fs {
+				if rules.MatchEntry(fs[i].Name, fs[i].IsDirectory()).IsIgnored() {
+					fs[i].SetIgnored()
+				}
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -279,7 +311,9 @@ func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 		l.Debugf("%v: Sending %d files", s, len(fs))
 
 		lastSequence := fs[len(fs)-1].Sequence
-		var err error
+		if err := lease.Check(); err != nil {
+			return err
+		}
 		if initial {
 			initial = false
 			err = s.conn.Index(ctx, &protocol.Index{

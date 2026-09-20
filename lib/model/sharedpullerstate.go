@@ -24,6 +24,7 @@ import (
 // A sharedPullerState is kept for each file that is being synced and is kept
 // updated along the way.
 type sharedPullerState struct {
+	ruleGeneration string
 	// Immutable, does not require locking
 	file          protocol.FileInfo // The new file (desired end state)
 	fs            fs.Filesystem

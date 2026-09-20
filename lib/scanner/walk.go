@@ -330,7 +330,7 @@ func (w *walker) walkAndHashFiles(ctx context.Context, toHashChan chan<- protoco
 		nonNormPath := path
 		path = normalizePath(path)
 
-		if m := w.Matcher.Match(path); m.IsIgnored() {
+		if m := w.Matcher.MatchEntry(path, info != nil && info.IsDir()); m.IsIgnored() {
 			l.Debugln(w, "ignored (patterns):", path)
 			// Only descend if matcher says so and the current file is not a symlink.
 			if err != nil || m.CanSkipDir() || info.IsSymlink() {

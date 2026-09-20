@@ -192,7 +192,7 @@ type deleteQueue struct {
 
 func (q *deleteQueue) handle(fi protocol.FileInfo) (bool, error) {
 	// Things that are ignored but not marked deletable are not processed.
-	ign := q.ignores.Match(fi.Name)
+	ign := q.ignores.MatchEntry(fi.Name, fi.IsDirectory())
 	if ign.IsIgnored() && !ign.IsDeletable() {
 		return false, nil
 	}

@@ -361,6 +361,9 @@ func (f *folder) Reschedule() {
 }
 
 func (f *folder) getHealthErrorAndLoadIgnores() error {
+	if err := domuneProbeRulesReady(f.Path); err != nil {
+		return err
+	}
 	if err := f.getHealthErrorWithoutIgnores(); err != nil {
 		return err
 	}
@@ -486,6 +489,11 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		return err
 	}
 	f.setError(ctx, nil)
+
+	// A control-only event changes decisions for existing content too.
+	if f.ignores.Hash() != oldHash {
+		subDirs = nil
+	}
 
 	// Check on the way out if the ignore patterns changed as part of scanning
 	// this folder. If they did we should schedule a pull of the folder so that
@@ -790,7 +798,7 @@ outer:
 				ignoredParent = ""
 			}
 
-			switch ignored := f.ignores.Match(fi.Name).IsIgnored(); {
+			switch ignored := f.ignores.MatchEntry(fi.Name, fi.IsDirectory()).IsIgnored(); {
 			case fi.IsIgnored() && ignored:
 				continue
 			case !fi.IsIgnored() && ignored:
@@ -980,7 +988,7 @@ loop:
 			continue
 		}
 
-		if f.ignores.Match(fi.Name).IsIgnored() {
+		if f.ignores.MatchEntry(fi.Name, fi.IsDirectory()).IsIgnored() {
 			continue
 		}
 
@@ -1122,7 +1130,7 @@ func (f *folder) monitorWatch(ctx context.Context) {
 	for {
 		select {
 		case <-failTimer.C:
-			eventChan, errChan, err = f.mtimefs.Watch(".", f.ignores, ctx, f.IgnorePerms)
+			eventChan, errChan, err = f.mtimefs.Watch(".", f.ignores.WatchMatcher(), ctx, f.IgnorePerms)
 			// We do this once per minute initially increased to
 			// max one hour in case of repeat failures.
 			f.scanOnWatchErr()

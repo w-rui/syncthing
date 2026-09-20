@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -326,7 +327,7 @@ func (c *rawConnection) Index(ctx context.Context, idx *Index) error {
 	default:
 	}
 	c.idxMut.Lock()
-	c.send(ctx, idx.toWire(), nil)
+	c.sendIndex(ctx, idx.toWire())
 	c.idxMut.Unlock()
 	return nil
 }
@@ -341,7 +342,7 @@ func (c *rawConnection) IndexUpdate(ctx context.Context, idxUp *IndexUpdate) err
 	default:
 	}
 	c.idxMut.Lock()
-	c.send(ctx, idxUp.toWire(), nil)
+	c.sendIndex(ctx, idxUp.toWire())
 	c.idxMut.Unlock()
 	return nil
 }
@@ -714,6 +715,21 @@ func (c *rawConnection) handleResponse(resp *Response) {
 		close(rc)
 	}
 	c.awaitingMut.Unlock()
+}
+
+// Domune's index publication lease must include queued wire writes. BEP stays
+// unchanged; reuse the same writer completion channel as block responses.
+func (c *rawConnection) sendIndex(ctx context.Context, msg proto.Message) {
+	if os.Getenv("DOMUNE_RULES_DIR") == "" {
+		c.send(ctx, msg, nil)
+		return
+	}
+	done := make(chan struct{})
+	c.send(ctx, msg, done)
+	select {
+	case <-done:
+	case <-c.closed:
+	}
 }
 
 func (c *rawConnection) send(ctx context.Context, msg proto.Message, done chan struct{}) bool {
