@@ -58,8 +58,8 @@ func (info) EstablishedAt() time.Time { return time.Now() }
 func (info) ConnectionID() string     { return "domune-acl-probe" }
 
 func run() error {
-	if len(os.Args) != 7 {
-		return fmt.Errorf("usage: domuneaclpeer CERT KEY ADDRESS REMOTE_ID SELF_ID PATH")
+	if len(os.Args) != 8 {
+		return fmt.Errorf("usage: domuneaclpeer CERT KEY ADDRESS REMOTE_ID SELF_ID PATH ALIAS_PATH")
 	}
 	cert, err := tls.LoadX509KeyPair(os.Args[1], os.Args[2])
 	if err != nil {
@@ -113,6 +113,13 @@ func run() error {
 	}
 	if requestErr != nil {
 		result["error"] = requestErr.Error()
+	}
+	aliasData, aliasErr := bep.Request(ctx, &protocol.Request{Folder: "probe", Name: os.Args[7], Size: len(payload), Hash: hash[:]})
+	result["aliasPath"] = os.Args[7]
+	result["aliasBytes"] = len(aliasData)
+	result["aliasDenied"] = aliasErr != nil
+	if aliasErr != nil {
+		result["aliasError"] = aliasErr.Error()
 	}
 	if allowedErr != nil {
 		return json.NewEncoder(os.Stdout).Encode(result)
