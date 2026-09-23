@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "/domune/schemas/runtime/sync-acl.schema.json",
+  "title": "SyncACL",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "root", "revision", "devices"],
+  "properties": {
+    "version": { "const": "domune-sync-acl/v1" },
+    "root": { "type": "string", "minLength": 1 },
+    "revision": { "type": "string", "minLength": 1 },
+    "devices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deviceID", "paths"],
+        "properties": {
+          "deviceID": { "type": "string", "minLength": 1 },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "read", "write"],
+              "properties": {
+                "path": { "type": "string" },
+                "read": { "type": "boolean" },
+                "write": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

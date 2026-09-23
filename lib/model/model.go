@@ -36,6 +36,7 @@ import (
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
+	"github.com/syncthing/syncthing/lib/domuneacl"
 	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -2002,6 +2003,7 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 	if leaseErr != nil {
 		return nil, leaseErr
 	}
+	var aclLease *domuneacl.Lease
 	defer func() {
 		if err == nil {
 			if checkErr := lease.Check(); checkErr != nil {
@@ -2014,8 +2016,11 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 		}
 		if out == nil {
 			lease.Close()
+			if aclLease != nil {
+				aclLease.Close()
+			}
 		} else {
-			out = &domuneResponse{RequestResponse: out, lease: lease}
+			out = &domuneResponse{RequestResponse: out, lease: lease, aclLease: aclLease}
 		}
 	}()
 	// Make sure the path is valid and in canonical form
@@ -2024,6 +2029,13 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 		return nil, protocol.ErrGeneric
 	} else {
 		req.Name = name
+	}
+	aclLease, err = domuneacl.Acquire(folderCfg.Path)
+	if err != nil {
+		return nil, err
+	}
+	if !aclLease.Allows(deviceID, req.Name, false) {
+		return nil, protocol.ErrGeneric
 	}
 
 	if deviceID != protocol.LocalDeviceID {
@@ -3517,7 +3529,14 @@ func without[E comparable, S ~[]E](s S, e E) S {
 
 type domuneResponse struct {
 	protocol.RequestResponse
-	lease *domunerules.Lease
+	lease    *domunerules.Lease
+	aclLease *domuneacl.Lease
 }
 
-func (r *domuneResponse) Close() { r.RequestResponse.Close(); r.lease.Close() }
+func (r *domuneResponse) Close() {
+	r.RequestResponse.Close()
+	r.lease.Close()
+	if r.aclLease != nil {
+		r.aclLease.Close()
+	}
+}

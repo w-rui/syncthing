@@ -11,12 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/itererr"
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/domuneacl"
 	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -266,6 +268,11 @@ func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 	if err := domuneProbeRulesReady(s.folderRoot); err != nil {
 		return err
 	}
+	acl, err := domuneacl.Acquire(s.folderRoot)
+	if err != nil {
+		return err
+	}
+	defer acl.Close()
 	var rules *ignore.Matcher
 	if domunerules.Enabled() {
 		rules = ignore.New(fs.NewFilesystem(fs.FilesystemTypeBasic, s.folderRoot))
@@ -311,6 +318,14 @@ func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 		l.Debugf("%v: Sending %d files", s, len(fs))
 
 		lastSequence := fs[len(fs)-1].Sequence
+		// Ignore flags are sent to peers for normal exclusion semantics. ACL
+		// denial must instead omit the entire FileInfo, including its name.
+		visible := fs[:0]
+		for _, file := range fs {
+			if acl.Allows(s.conn.DeviceID(), file.Name, false) {
+				visible = append(visible, file)
+			}
+		}
 		if err := lease.Check(); err != nil {
 			return err
 		}
@@ -318,13 +333,13 @@ func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 			initial = false
 			err = s.conn.Index(ctx, &protocol.Index{
 				Folder:       s.folder,
-				Files:        fs,
+				Files:        visible,
 				LastSequence: lastSequence,
 			})
 		} else {
 			err = s.conn.IndexUpdate(ctx, &protocol.IndexUpdate{
 				Folder:       s.folder,
-				Files:        fs,
+				Files:        visible,
 				PrevSequence: s.sentPrevSequence,
 				LastSequence: lastSequence,
 			})
@@ -389,6 +404,16 @@ func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 
 func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, prevSequence, lastSequence int64) error {
 	deviceID := s.conn.DeviceID()
+	acl, err := domuneacl.Acquire(s.folderRoot)
+	if err != nil {
+		return err
+	}
+	defer acl.Close()
+	for _, file := range fs {
+		if !acl.Allows(deviceID, file.Name, true) && !(acl.Allows(deviceID, file.Name, false) && s.readonlyEcho(file)) {
+			return fmt.Errorf("ACL denied %s index path %q", deviceID.Short(), file.Name)
+		}
+	}
 
 	s.cond.L.Lock()
 	paused := s.paused
@@ -496,6 +521,25 @@ func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, p
 	})
 
 	return nil
+}
+
+// A read-only peer reports the index of content it just downloaded. Accept
+// only an exact echo of the current local version; it cannot introduce a new
+// version, deletion, block list, or metadata this way.
+func (s *indexHandler) readonlyEcho(file protocol.FileInfo) bool {
+	if s.sdb == nil {
+		return false
+	}
+	local, ok, err := s.sdb.GetDeviceFile(s.folder, protocol.LocalDeviceID, file.Name)
+	if err != nil || !ok || !local.Version.Equal(file.Version) || !local.IsEquivalent(file, 0) || !local.BlocksEqual(file) {
+		return false
+	}
+	// Sequence and local flags are host bookkeeping. Every other FileInfo
+	// field must match, including metadata omitted by IsEquivalent.
+	local.Sequence, file.Sequence = 0, 0
+	local.LocalFlags, file.LocalFlags = 0, 0
+	local.New, file.New = false, false
+	return reflect.DeepEqual(local, file)
 }
 
 func (s *indexHandler) logSequenceAnomaly(msg string, extra map[string]any) {

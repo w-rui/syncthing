@@ -48,6 +48,7 @@ import (
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
 	"github.com/syncthing/syncthing/lib/discover"
+	"github.com/syncthing/syncthing/lib/domuneacl"
 	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -258,6 +259,8 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/file", s.getDBFile)                         // folder file
 	restMux.HandlerFunc(http.MethodGet, "/rest/domune/rules", s.getDomuneRules)
 	restMux.HandlerFunc(http.MethodPost, "/rest/domune/rules", s.postDomuneRules)
+	restMux.HandlerFunc(http.MethodGet, "/rest/domune/acl", s.getDomuneACL)
+	restMux.HandlerFunc(http.MethodPost, "/rest/domune/acl", s.postDomuneACL)
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/ignores", s.getDBIgnores)                 // folder
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/need", s.getDBNeed)                       // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/remoteneed", s.getDBRemoteNeed)           // device folder [perpage] [page]
@@ -2059,4 +2062,45 @@ func (s *service) postDomuneRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.getDomuneRules(w, r)
+}
+
+func (s *service) getDomuneACL(w http.ResponseWriter, r *http.Request) {
+	cfg, ok := s.cfg.Folders()[r.URL.Query().Get("folder")]
+	if !ok {
+		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	lease, err := domuneacl.Acquire(cfg.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	defer lease.Close()
+	if !domuneacl.Enabled() {
+		http.Error(w, "Domune ACL disabled", http.StatusServiceUnavailable)
+		return
+	}
+	sendJSON(w, map[string]any{"revision": lease.Revision(), "ready": true})
+}
+
+func (s *service) postDomuneACL(w http.ResponseWriter, r *http.Request) {
+	cfg, ok := s.cfg.Folders()[r.URL.Query().Get("folder")]
+	if !ok {
+		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	if !cfg.Paused {
+		http.Error(w, "pause folder before replacing ACL", http.StatusConflict)
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := domuneacl.Apply(cfg.Path, data); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.getDomuneACL(w, r)
 }
