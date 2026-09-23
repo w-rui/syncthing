@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -65,9 +66,11 @@ type gate struct {
 	current      *document
 	epoch        atomic.Uint64
 	appliedEpoch uint64
+	changed      chan struct{}
 }
 
 var gates sync.Map
+var ErrAuthorityRequired = errors.New("ACL requires fresh authority confirmation")
 var instanceID = func() string {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -78,7 +81,7 @@ var instanceID = func() string {
 
 func Enabled() bool { return domunerules.Enabled() }
 func state(root string) *gate {
-	value, _ := gates.LoadOrStore(root, &gate{})
+	value, _ := gates.LoadOrStore(root, &gate{changed: make(chan struct{})})
 	return value.(*gate)
 }
 func validPath(name string, root bool) bool {
@@ -149,6 +152,7 @@ func ApplyContext(ctx context.Context, root string, raw []byte) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("ACL application not completed: %w", err)
 	}
+	epoch := g.epoch.Load()
 	if g.current != nil {
 		if next.Generation < g.current.Generation {
 			return fmt.Errorf("stale ACL generation")
@@ -160,9 +164,26 @@ func ApplyContext(ctx context.Context, root string, raw []byte) error {
 			return fmt.Errorf("ACL revision already used for different content")
 		}
 	}
+	if g.epoch.Load() != epoch {
+		return fmt.Errorf("connection changed during ACL confirmation")
+	}
 	g.current = &next
-	g.appliedEpoch = g.epoch.Load()
+	g.appliedEpoch = epoch
+	close(g.changed)
+	g.changed = make(chan struct{})
 	return nil
+}
+
+// Changed closes when a fresh ACL projection is installed. Obtain this before
+// checking readiness to avoid missing a concurrent Apply.
+func Changed(root string) <-chan struct{} {
+	if !Enabled() {
+		return nil
+	}
+	g := state(root)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.changed
 }
 
 func sameContent(a, b *document) bool {
@@ -221,7 +242,7 @@ func Acquire(root string) (*Lease, error) {
 	epoch := g.epoch.Load()
 	if g.current == nil || g.appliedEpoch != epoch {
 		g.mu.RUnlock()
-		return nil, fmt.Errorf("ACL requires fresh authority confirmation")
+		return nil, ErrAuthorityRequired
 	}
 	return &Lease{gate: g, snapshot: g.current, epoch: epoch}, nil
 }
@@ -273,7 +294,7 @@ func (l *Lease) Allows(id protocol.DeviceID, name string, write bool) bool {
 
 func (l *Lease) Check() error {
 	if l.gate != nil && l.gate.epoch.Load() != l.epoch {
-		return fmt.Errorf("ACL connection generation invalidated")
+		return fmt.Errorf("%w: connection generation invalidated", ErrAuthorityRequired)
 	}
 	return nil
 }

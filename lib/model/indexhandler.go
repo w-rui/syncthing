@@ -189,7 +189,7 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 	if err := s.waitWhilePaused(ctx); err != nil {
 		return err
 	}
-	err = s.sendIndexTo(ctx)
+	err = s.sendIndexWhenReady(ctx)
 
 	// Subscribe to LocalIndexUpdated (we have new information to send) and
 	// DeviceDisconnected (it might be us who disconnected, so we should
@@ -225,7 +225,7 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 			continue
 		}
 
-		err = s.sendIndexTo(ctx)
+		err = s.sendIndexWhenReady(ctx)
 
 		// Wait a short amount of time before entering the next loop. If there
 		// are continuous changes happening to the local index, this gives us
@@ -238,6 +238,36 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 	}
 
 	return err
+}
+
+// A missing or disconnected authority is a state to wait through on this
+// connection. Other errors still terminate the sender. The change channels are
+// captured before checking authority so an Apply between check and wait wakes
+// this attempt rather than leaving it stuck until another Apply.
+func (s *indexHandler) sendIndexWhenReady(ctx context.Context) error {
+	for {
+		if err := s.waitWhilePaused(ctx); err != nil {
+			return err
+		}
+		rulesChanged := domunerules.Changed(s.folderRoot)
+		aclChanged := domuneacl.Changed(s.folderRoot)
+		err := s.sendIndexTo(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, domunerules.ErrAuthorityRequired) && !errors.Is(err, domuneacl.ErrAuthorityRequired) {
+			return err
+		}
+		// sendIndexTo may have read ahead before an authority invalidation.
+		// Only batches acknowledged by the connection can advance the cursor.
+		s.localPrevSequence = s.sentPrevSequence
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-rulesChanged:
+		case <-aclChanged:
+		}
+	}
 }
 
 // resume might be called because the folder was actually resumed, or just
@@ -326,6 +356,9 @@ func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 			}
 		}
 		if err := lease.Check(); err != nil {
+			return err
+		}
+		if err := acl.Check(); err != nil {
 			return err
 		}
 		if initial {
