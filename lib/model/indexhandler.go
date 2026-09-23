@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"sync"
 	"time"
 
@@ -523,23 +522,22 @@ func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, p
 	return nil
 }
 
-// A read-only peer reports the index of content it just downloaded. Accept
-// only an exact echo of the current local version; it cannot introduce a new
-// version, deletion, block list, or metadata this way.
+// A read-only peer reports the index of content it downloaded. The local
+// authoritative index may have advanced before its echo arrives. A strictly
+// dominated version cannot win or change the global index; an equal version
+// must still match every content and metadata field exactly.
 func (s *indexHandler) readonlyEcho(file protocol.FileInfo) bool {
 	if s.sdb == nil {
 		return false
 	}
 	local, ok, err := s.sdb.GetDeviceFile(s.folder, protocol.LocalDeviceID, file.Name)
-	if err != nil || !ok || !local.Version.Equal(file.Version) || !local.IsEquivalent(file, 0) || !local.BlocksEqual(file) {
+	if err != nil || !ok {
 		return false
 	}
-	// Sequence and local flags are host bookkeeping. Every other FileInfo
-	// field must match, including metadata omitted by IsEquivalent.
-	local.Sequence, file.Sequence = 0, 0
-	local.LocalFlags, file.LocalFlags = 0, 0
-	local.New, file.New = false, false
-	return reflect.DeepEqual(local, file)
+	if local.Version.Compare(file.Version) == protocol.Greater {
+		return true
+	}
+	return sameIncomingFile(local, file)
 }
 
 func (s *indexHandler) logSequenceAnomaly(msg string, extra map[string]any) {

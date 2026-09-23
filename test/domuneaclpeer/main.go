@@ -106,13 +106,16 @@ func run() error {
 	allowed := []byte("authorized read from a")
 	allowedHash := sha256.Sum256(allowed)
 	allowedData, allowedErr := bep.Request(ctx, &protocol.Request{Folder: "probe", Name: "shared/from-a.txt", Size: len(allowed), Hash: allowedHash[:]})
-	if allowedErr != nil || !bytes.Equal(allowedData, allowed) {
-		return fmt.Errorf("authorized direct request failed: %v", allowedErr)
-	}
 	data, requestErr := bep.Request(ctx, &protocol.Request{Folder: "probe", Name: os.Args[6], Size: len(payload), Hash: hash[:]})
-	result := map[string]any{"connected": true, "authorizedBytes": len(allowedData), "path": os.Args[6], "denied": requestErr != nil, "bytes": len(data)}
+	result := map[string]any{"connected": true, "authorizedBytes": len(allowedData), "authorizedDenied": allowedErr != nil, "authorizedContentValid": bytes.Equal(allowedData, allowed), "path": os.Args[6], "denied": requestErr != nil, "bytes": len(data)}
+	if allowedErr != nil {
+		result["authorizedError"] = allowedErr.Error()
+	}
 	if requestErr != nil {
 		result["error"] = requestErr.Error()
+	}
+	if allowedErr != nil {
+		return json.NewEncoder(os.Stdout).Encode(result)
 	}
 	deletion := protocol.FileInfo{
 		Name: "shared/from-b.txt", Type: protocol.FileInfoTypeFile, Deleted: true,

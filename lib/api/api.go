@@ -2070,17 +2070,11 @@ func (s *service) getDomuneACL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown folder", http.StatusNotFound)
 		return
 	}
-	lease, err := domuneacl.Acquire(cfg.Path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	defer lease.Close()
 	if !domuneacl.Enabled() {
 		http.Error(w, "Domune ACL disabled", http.StatusServiceUnavailable)
 		return
 	}
-	sendJSON(w, map[string]any{"revision": lease.Revision(), "ready": true})
+	sendJSON(w, domuneacl.Readiness(cfg.Path))
 }
 
 func (s *service) postDomuneACL(w http.ResponseWriter, r *http.Request) {
@@ -2098,7 +2092,9 @@ func (s *service) postDomuneACL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := domuneacl.Apply(cfg.Path, data); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := domuneacl.ApplyContext(ctx, cfg.Path, data); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/domuneacl"
 	"github.com/syncthing/syncthing/lib/domunerules"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -336,6 +337,12 @@ loop:
 			break loop
 		default:
 		}
+		if acl, err := f.incomingACL(file); err != nil {
+			f.newPullError(file.Name, err)
+			continue
+		} else {
+			acl.Close()
+		}
 
 		if f.IgnoreDelete && file.IsDeleted() {
 			f.sl.DebugContext(ctx, "Ignoring file deletion per config", slogutil.FilePath(file.FileName()))
@@ -466,6 +473,13 @@ nextFile:
 			f.queue.Done(fileName)
 			continue
 		}
+		if acl, err := f.incomingACL(fi); err != nil {
+			f.newPullError(fi.Name, err)
+			f.queue.Done(fileName)
+			continue
+		} else {
+			acl.Close()
+		}
 
 		if !f.checkParent(fi.Name, scanChan) {
 			f.queue.Done(fileName)
@@ -561,7 +575,17 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 		return
 	}
 	defer lease.Close()
+	acl, aclErr := f.incomingACL(file)
+	if aclErr != nil {
+		f.newPullError(file.Name, aclErr)
+		return
+	}
+	defer acl.Close()
 	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+	if err := acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
 		return
 	}
 
@@ -614,6 +638,10 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 		}
 
 		// Remove it to replace with the dir.
+		if err = acl.Check(); err != nil {
+			f.newPullError(file.Name, err)
+			return
+		}
 		if !curFile.IsSymlink() && file.InConflictWith(curFile) {
 			// The new file has been changed in conflict with the existing one. We
 			// should file it away as a conflict instead of just removing or
@@ -663,6 +691,10 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 			return f.mtimefs.Chmod(path, mode|(info.Mode()&retainBits))
 		}
 
+		if err = acl.Check(); err != nil {
+			f.newPullError(file.Name, err)
+			return
+		}
 		if err = f.inWritableDir(mkdir, file.Name); err == nil {
 			dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleDir}
 		} else {
@@ -680,6 +712,10 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 	// don't handle modification times on directories, because that sucks...)
 	// It's OK to change mode bits on stuff within non-writable directories.
 	if !f.IgnorePerms && !file.NoPermissions {
+		if err := acl.Check(); err != nil {
+			f.newPullError(file.Name, err)
+			return
+		}
 		if err := f.mtimefs.Chmod(file.Name, mode|(info.Mode()&retainBits)); err != nil {
 			f.newPullError(file.Name, fmt.Errorf("handling dir (setting permissions): %w", err))
 			return
@@ -695,6 +731,23 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 // checkParent verifies that the thing we are handling lives inside a directory,
 // and not a symlink or regular file. It also resurrects missing parent dirs.
 func (f *sendReceiveFolder) checkParent(file string, scanChan chan<- string) bool {
+	if domuneacl.Enabled() {
+		global, ok, err := f.model.sdb.GetGlobalFile(f.folderID, file)
+		if err != nil || !ok {
+			f.newPullError(file, fmt.Errorf("ACL cannot verify parent source: %v", err))
+			return false
+		}
+		acl, err := f.incomingACL(global)
+		if err != nil {
+			f.newPullError(file, err)
+			return false
+		}
+		defer acl.Close()
+		if err := acl.Check(); err != nil {
+			f.newPullError(file, err)
+			return false
+		}
+	}
 	parent := filepath.Dir(file)
 
 	if err := osutil.TraversesSymlink(f.mtimefs, parent); err != nil {
@@ -740,7 +793,17 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 		return
 	}
 	defer lease.Close()
+	acl, aclErr := f.incomingACL(file)
+	if aclErr != nil {
+		f.newPullError(file.Name, aclErr)
+		return
+	}
+	defer acl.Close()
 	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+	if err := acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
 		return
 	}
 
@@ -782,6 +845,10 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 		return
 	}
 
+	if err = acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
+		return
+	}
 	if err = f.handleSymlinkCheckExisting(file, scanChan); err != nil {
 		f.newPullError(file.Name, fmt.Errorf("handling symlink: %w", err))
 		return
@@ -796,6 +863,10 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 		return f.setPlatformData(&file, path)
 	}
 
+	if err = acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
+		return
+	}
 	if err = f.inWritableDir(createLink, file.Name); err == nil {
 		dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleSymlink}
 	} else {
@@ -844,7 +915,17 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 		return
 	}
 	defer lease.Close()
+	acl, aclErr := f.incomingACL(file)
+	if aclErr != nil {
+		f.newPullError(file.Name, aclErr)
+		return
+	}
+	defer acl.Close()
 	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+	if err := acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
 		return
 	}
 
@@ -882,12 +963,18 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 
 	if err = f.checkToBeDeleted(file, cur, hasCur, scanChan); err != nil {
 		if fs.IsNotExist(err) || fs.IsErrCaseConflict(err) {
+			if err = acl.Check(); err != nil {
+				return
+			}
 			err = nil
 			dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteDir}
 		}
 		return
 	}
 
+	if err = acl.Check(); err != nil {
+		return
+	}
 	if err = f.deleteDirOnDisk(file.Name, scanChan); err != nil {
 		return
 	}
@@ -912,7 +999,17 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 		return
 	}
 	defer lease.Close()
+	acl, aclErr := f.incomingACL(file)
+	if aclErr != nil {
+		f.newPullError(file.Name, aclErr)
+		return
+	}
+	defer acl.Close()
 	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+	if err := acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
 		return
 	}
 
@@ -951,6 +1048,9 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 
 	if err = f.checkToBeDeleted(file, cur, hasCur, scanChan); err != nil {
 		if fs.IsNotExist(err) || fs.IsErrCaseConflict(err) {
+			if err = acl.Check(); err != nil {
+				return
+			}
 			err = nil
 			dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteFile}
 		}
@@ -961,6 +1061,9 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 	// is a directory. Something is wrong here, should probably not happen.
 	if cur.IsDirectory() {
 		err = errUnexpectedDirOnFileDel
+		return
+	}
+	if err = acl.Check(); err != nil {
 		return
 	}
 
@@ -1320,7 +1423,17 @@ func (f *sendReceiveFolder) shortcutFile(file protocol.FileInfo, dbUpdateChan ch
 		return
 	}
 	defer lease.Close()
+	acl, aclErr := f.incomingACL(file)
+	if aclErr != nil {
+		f.newPullError(file.Name, aclErr)
+		return
+	}
+	defer acl.Close()
 	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
+		return
+	}
+	if err := acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
 		return
 	}
 
@@ -1350,6 +1463,10 @@ func (f *sendReceiveFolder) shortcutFile(file protocol.FileInfo, dbUpdateChan ch
 	}()
 
 	f.queue.Done(file.Name)
+	if err = acl.Check(); err != nil {
+		f.newPullError(file.Name, err)
+		return
+	}
 
 	if !f.IgnorePerms && !file.NoPermissions {
 		if err = f.mtimefs.Chmod(file.Name, fs.FileMode(file.Permissions&0o777)); err != nil {
@@ -1542,6 +1659,12 @@ func (f *sendReceiveFolder) copyBlockFromFile(ctx context.Context, srcName strin
 		return false
 	}
 	defer lease.Close()
+	acl, aclErr := f.incomingACL(state.file)
+	if aclErr != nil {
+		state.fail(aclErr)
+		return false
+	}
+	defer acl.Close()
 
 	fd, err := ffs.Open(srcName)
 	if err != nil {
@@ -1567,6 +1690,10 @@ func (f *sendReceiveFolder) copyBlockFromFile(ctx context.Context, srcName strin
 	}
 
 	if err := lease.Check(); err != nil {
+		state.fail(err)
+		return false
+	}
+	if err := acl.Check(); err != nil {
 		state.fail(err)
 		return false
 	}
@@ -1652,6 +1779,18 @@ func (f *sendReceiveFolder) pullBlock(ctx context.Context, state pullBlockState,
 		return
 	}
 	defer lease.Close()
+	acl, aclErr := f.incomingACL(state.file)
+	if aclErr != nil {
+		state.fail(aclErr)
+		out <- state.sharedPullerState
+		return
+	}
+	defer acl.Close()
+	if err := acl.Check(); err != nil {
+		state.fail(err)
+		out <- state.sharedPullerState
+		return
+	}
 
 	// Get an fd to the temporary file. Technically we don't need it until
 	// after fetching the block, but if we run into an error here there is
@@ -1708,6 +1847,10 @@ loop:
 		selected := candidates[found]
 		candidates[found] = candidates[len(candidates)-1]
 		candidates = candidates[:len(candidates)-1]
+		if domuneacl.Enabled() && !acl.Allows(selected.ID, state.file.Name, true) {
+			lastError = fmt.Errorf("ACL denied block source %s", selected.ID.Short())
+			continue
+		}
 
 		// Fetch the block, while marking the selected device as in use so that
 		// leastBusy can select another device when someone else asks.
@@ -1738,6 +1881,10 @@ loop:
 			state.fail(err)
 			break
 		}
+		if err := acl.Check(); err != nil {
+			state.fail(err)
+			break
+		}
 		// Save the block data we got from the cluster
 		err = f.limitedWriteAt(ctx, fd, buf, state.block.Offset)
 		if err != nil {
@@ -1756,6 +1903,11 @@ func (f *sendReceiveFolder) performFinish(file, curFile protocol.FileInfo, hasCu
 		return err
 	}
 	defer lease.Close()
+	acl, err := f.incomingACL(file)
+	if err != nil {
+		return err
+	}
+	defer acl.Close()
 	if f.ignores.MatchEntry(file.Name, file.IsDirectory()).IsIgnored() {
 		return fmt.Errorf("rule excluded final write")
 	}
@@ -1775,6 +1927,9 @@ func (f *sendReceiveFolder) performFinish(file, curFile protocol.FileInfo, hasCu
 	// Check before any destructive finalization; a later refusal after deleting
 	// the old file would itself lose data. The lease drains managed updates.
 	if err := lease.Check(); err != nil {
+		return err
+	}
+	if err := acl.Check(); err != nil {
 		return err
 	}
 	if stat, err := f.mtimefs.Lstat(file.Name); err == nil {

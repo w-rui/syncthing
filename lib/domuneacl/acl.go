@@ -6,13 +6,19 @@
 package domuneacl
 
 import (
+	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/syncthing/syncthing/lib/domunerules"
@@ -47,17 +53,28 @@ type device struct {
 	Paths    []entry `json:"paths"`
 }
 type document struct {
-	Version  string   `json:"version"`
-	Root     string   `json:"root"`
-	Revision string   `json:"revision"`
-	Devices  []device `json:"devices"`
+	Version    string   `json:"version"`
+	Root       string   `json:"root"`
+	InstanceID string   `json:"instanceId"`
+	Generation int64    `json:"generation"`
+	Revision   string   `json:"revision"`
+	Devices    []device `json:"devices"`
 }
 type gate struct {
-	mu      sync.RWMutex
-	current *document
+	mu           sync.RWMutex
+	current      *document
+	epoch        atomic.Uint64
+	appliedEpoch uint64
 }
 
 var gates sync.Map
+var instanceID = func() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(value[:])
+}()
 
 func Enabled() bool { return domunerules.Enabled() }
 func state(root string) *gate {
@@ -75,6 +92,14 @@ func validPath(name string, root bool) bool {
 // Apply replaces the in-memory projection while the folder is paused. Nothing
 // is trusted from disk at startup: a missing fresh projection stays denied.
 func Apply(root string, raw []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return ApplyContext(ctx, root, raw)
+}
+
+// ApplyContext never acknowledges a projection while an earlier operation
+// still holds a lease. A busy operation leaves the previous ACL unchanged.
+func ApplyContext(ctx context.Context, root string, raw []byte) error {
 	if !Enabled() {
 		return fmt.Errorf("Domune ACL requires managed rules")
 	}
@@ -92,6 +117,9 @@ func Apply(root string, raw []byte) error {
 	if next.Root != root || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return fmt.Errorf("invalid ACL root")
 	}
+	if next.InstanceID != instanceID {
+		return fmt.Errorf("ACL projection belongs to another core instance")
+	}
 	seenDevices := make(map[protocol.DeviceID]bool)
 	for _, member := range next.Devices {
 		id, err := protocol.DeviceIDFromString(member.DeviceID)
@@ -108,17 +136,80 @@ func Apply(root string, raw []byte) error {
 		}
 	}
 	g := state(root)
-	g.mu.Lock()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for !g.mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("ACL application not completed: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	defer g.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("ACL application not completed: %w", err)
+	}
+	if g.current != nil {
+		if next.Generation < g.current.Generation {
+			return fmt.Errorf("stale ACL generation")
+		}
+		if next.Generation == g.current.Generation && !sameDocument(&next, g.current) {
+			return fmt.Errorf("ACL generation already used for different content")
+		}
+		if next.Revision == g.current.Revision && !sameContent(&next, g.current) {
+			return fmt.Errorf("ACL revision already used for different content")
+		}
+	}
 	g.current = &next
-	g.mu.Unlock()
+	g.appliedEpoch = g.epoch.Load()
 	return nil
 }
+
+func sameContent(a, b *document) bool {
+	ac, bc := *a, *b
+	ac.Generation, bc.Generation = 0, 0
+	return reflect.DeepEqual(ac, bc)
+}
+
+func sameDocument(a, b *document) bool { return reflect.DeepEqual(a, b) }
 
 // Lease holds a consistent authorization snapshot across a protocol operation.
 // Apply waits until every active lease is closed.
 type Lease struct {
 	gate     *gate
 	snapshot *document
+	epoch    uint64
+}
+
+type Status struct {
+	InstanceID string `json:"instanceId"`
+	Generation int64  `json:"generation"`
+	Revision   string `json:"revision,omitempty"`
+	Ready      bool   `json:"ready"`
+}
+
+func Readiness(root string) Status {
+	result := Status{InstanceID: instanceID}
+	if !Enabled() {
+		return result
+	}
+	g := state(root)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.current != nil {
+		result.Generation = g.current.Generation
+		result.Revision = g.current.Revision
+		result.Ready = g.appliedEpoch == g.epoch.Load()
+	}
+	return result
+}
+
+// Invalidate prevents a disconnected peer from using a projection from its
+// previous connection. It does not wait while model locks are held.
+func Invalidate(root string) {
+	if Enabled() {
+		state(root).epoch.Add(1)
+	}
 }
 
 func Acquire(root string) (*Lease, error) {
@@ -127,11 +218,12 @@ func Acquire(root string) (*Lease, error) {
 	}
 	g := state(root)
 	g.mu.RLock()
-	if g.current == nil {
+	epoch := g.epoch.Load()
+	if g.current == nil || g.appliedEpoch != epoch {
 		g.mu.RUnlock()
 		return nil, fmt.Errorf("ACL requires fresh authority confirmation")
 	}
-	return &Lease{gate: g, snapshot: g.current}, nil
+	return &Lease{gate: g, snapshot: g.current, epoch: epoch}, nil
 }
 func (l *Lease) Close() {
 	if l.gate != nil {
@@ -148,6 +240,9 @@ func (l *Lease) Revision() string {
 func (l *Lease) Allows(id protocol.DeviceID, name string, write bool) bool {
 	if l.snapshot == nil {
 		return true
+	}
+	if l.gate.epoch.Load() != l.epoch {
+		return false
 	}
 	if !validPath(name, false) {
 		return false
@@ -174,4 +269,11 @@ func (l *Lease) Allows(id protocol.DeviceID, name string, write bool) bool {
 		return selected.Read
 	}
 	return false
+}
+
+func (l *Lease) Check() error {
+	if l.gate != nil && l.gate.epoch.Load() != l.epoch {
+		return fmt.Errorf("ACL connection generation invalidated")
+	}
+	return nil
 }

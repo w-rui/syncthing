@@ -1902,6 +1902,7 @@ func (m *model) Closed(conn protocol.Connection, err error) {
 		for _, cfg := range m.folderCfgs {
 			if cfg.SharedWith(deviceID) {
 				domunerules.Invalidate(cfg.Path)
+				domuneacl.Invalidate(cfg.Path)
 			}
 		}
 		delete(m.deviceConnIDs, deviceID)

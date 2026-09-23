@@ -4,10 +4,12 @@
   "title": "SyncACL",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "root", "revision", "devices"],
+  "required": ["version", "root", "instanceId", "generation", "revision", "devices"],
   "properties": {
     "version": { "const": "domune-sync-acl/v1" },
     "root": { "type": "string", "minLength": 1 },
+    "instanceId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
     "revision": { "type": "string", "minLength": 1 },
     "devices": {
       "type": "array",

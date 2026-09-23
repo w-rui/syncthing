@@ -4,6 +4,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,7 +44,7 @@ func TestDomuneACLBlocksDirectRequestAndReadonlyIndex(t *testing.T) {
 	if response, err := m.Request(device1Conn, request); err == nil || response != nil {
 		t.Fatal("missing ACL served a direct block request")
 	}
-	rawACL, _ := json.Marshal(map[string]any{"version": "domune-sync-acl/v1", "root": root, "revision": "readonly", "devices": []any{map[string]any{"deviceID": device1.String(), "paths": []any{map[string]any{"path": "shared", "read": true, "write": false}}}}})
+	rawACL, _ := json.Marshal(map[string]any{"version": "domune-sync-acl/v1", "root": root, "instanceId": domuneacl.Readiness(root).InstanceID, "generation": 1, "revision": "readonly", "devices": []any{map[string]any{"deviceID": device1.String(), "paths": []any{map[string]any{"path": "shared", "read": true, "write": false}}}}})
 	if err := domuneacl.Apply(root, rawACL); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +79,11 @@ func TestDomuneReadonlyEchoRequiresAuthoritativeVersionAndContent(t *testing.T) 
 	if handler.readonlyEcho(changed) {
 		t.Fatal("new version accepted as read-only echo")
 	}
+	older := local
+	older.Version = protocol.Vector{}
+	if !handler.readonlyEcho(older) {
+		t.Fatal("strictly dominated read-only echo rejected")
+	}
 	changed = local
 	changed.Size++
 	if handler.readonlyEcho(changed) {
@@ -97,5 +103,43 @@ func TestDomuneReadonlyEchoRequiresAuthoritativeVersionAndContent(t *testing.T) 
 	}
 	if !handler.readonlyEcho(tombstone) {
 		t.Fatal("identical tombstone echo rejected")
+	}
+}
+
+func TestDomuneRetainedGlobalIndexNeedsCurrentWriter(t *testing.T) {
+	t.Setenv("DOMUNE_RULES_DIR", t.TempDir())
+	root := t.TempDir()
+	database, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	file := protocol.FileInfo{Name: "shared/queued", Type: protocol.FileInfoTypeFile, Version: protocol.Vector{}.Update(device1.Short()), Sequence: 1, Size: 5}
+	if err := database.Update("probe", device1, []protocol.FileInfo{file}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.FolderConfiguration{ID: "probe", Path: root}
+	f := &sendReceiveFolder{folder: &folder{FolderConfiguration: cfg, stateTracker: stateTracker{folderID: "probe"}, model: &model{sdb: database}}}
+	apply := func(generation int, allowed bool) {
+		t.Helper()
+		paths := []any{}
+		if allowed {
+			paths = append(paths, map[string]any{"path": "shared", "read": true, "write": true})
+		}
+		raw, _ := json.Marshal(map[string]any{"version": "domune-sync-acl/v1", "root": root, "instanceId": domuneacl.Readiness(root).InstanceID, "generation": generation, "revision": fmt.Sprint(generation), "devices": []any{map[string]any{"deviceID": device1.String(), "paths": paths}}})
+		if err := domuneacl.Apply(root, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply(1, true)
+	lease, err := f.incomingACL(file)
+	if err != nil {
+		t.Fatalf("authorized source rejected: %v", err)
+	}
+	lease.Close()
+	apply(2, false)
+	if lease, err := f.incomingACL(file); err == nil {
+		lease.Close()
+		t.Fatal("retained global index accepted after writer revocation")
 	}
 }
