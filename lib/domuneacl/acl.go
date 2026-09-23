@@ -292,6 +292,30 @@ func (l *Lease) Allows(id protocol.DeviceID, name string, write bool) bool {
 	return false
 }
 
+// HasNarrowerWriteRestriction reports whether replacing or deleting name as a
+// whole would cross an explicit non-writable descendant. Every restricted
+// prefix matters, even if a still deeper path has been regranted write access.
+func (l *Lease) HasNarrowerWriteRestriction(id protocol.DeviceID, name string) bool {
+	if l.snapshot == nil {
+		return false
+	}
+	if l.gate.epoch.Load() != l.epoch || !validPath(name, false) {
+		return true
+	}
+	for _, member := range l.snapshot.Devices {
+		if member.DeviceID != id.String() {
+			continue
+		}
+		for _, grant := range member.Paths {
+			if !grant.Write && strings.HasPrefix(grant.Path, name+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
 func (l *Lease) Check() error {
 	if l.gate != nil && l.gate.epoch.Load() != l.epoch {
 		return fmt.Errorf("%w: connection generation invalidated", ErrAuthorityRequired)

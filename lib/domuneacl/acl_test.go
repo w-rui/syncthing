@@ -53,6 +53,52 @@ func TestACLDefaultDenyAndLongestPath(t *testing.T) {
 	}
 }
 
+func TestACLNarrowerRestrictionSurvivesDeeperRegrant(t *testing.T) {
+	t.Setenv("DOMUNE_RULES_DIR", t.TempDir())
+	root := t.TempDir()
+	id := protocol.NewDeviceID([]byte("known device"))
+	raw := aclDocument(root, id, []entry{
+		{Path: "", Read: true, Write: true},
+		{Path: "shared/private", Read: true, Write: false},
+		{Path: "shared/private/public", Read: true, Write: true},
+	})
+	if err := Apply(root, raw); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := Acquire(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if !lease.HasNarrowerWriteRestriction(id, "shared") {
+		t.Fatal("deep rw regrant hid intermediate readonly restriction")
+	}
+	if lease.HasNarrowerWriteRestriction(id, "shared/allowed") {
+		t.Fatal("unrestricted sibling was blocked")
+	}
+	if lease.HasNarrowerWriteRestriction(id, "shared/private/public") {
+		t.Fatal("direct regranted subtree was blocked by its ancestor")
+	}
+}
+
+func TestACLSubtreeGrantNeedsNoBroadAncestor(t *testing.T) {
+	t.Setenv("DOMUNE_RULES_DIR", t.TempDir())
+	root := t.TempDir()
+	id := protocol.NewDeviceID([]byte("known device"))
+	raw := aclDocument(root, id, []entry{{Path: "shared/allowed", Read: true, Write: true}})
+	if err := Apply(root, raw); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := Acquire(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if lease.Allows(id, "shared", false) || !lease.Allows(id, "shared/allowed/file", true) || lease.Allows(id, "shared/sibling/file", false) {
+		t.Fatal("subtree grant required broad ancestor or exposed sibling")
+	}
+}
+
 func TestACLRejectsInvalidProjectionWithoutReplacingSnapshot(t *testing.T) {
 	t.Setenv("DOMUNE_RULES_DIR", t.TempDir())
 	root := t.TempDir()

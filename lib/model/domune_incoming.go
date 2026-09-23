@@ -11,6 +11,10 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
+func replacesDescendantTree(file protocol.FileInfo) bool {
+	return file.IsDeleted() || !file.IsDirectory()
+}
+
 // incomingACL binds a pending global item to an authenticated device index
 // that still has write permission. A retained global index or a matching
 // local/temporary block is never authority by itself.
@@ -35,6 +39,9 @@ func (f *sendReceiveFolder) incomingACL(file protocol.FileInfo) (*domuneacl.Leas
 	}
 	for _, device := range devices {
 		if !lease.Allows(device, file.Name, true) {
+			continue
+		}
+		if replacesDescendantTree(file) && lease.HasNarrowerWriteRestriction(device, file.Name) {
 			continue
 		}
 		indexed, ok, err := f.model.sdb.GetDeviceFile(f.folderID, device, file.Name)

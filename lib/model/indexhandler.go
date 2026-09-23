@@ -442,9 +442,15 @@ func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, p
 	}
 	defer acl.Close()
 	for _, file := range fs {
+		if replacesDescendantTree(file) && acl.HasNarrowerWriteRestriction(deviceID, file.Name) {
+			return fmt.Errorf("ACL denied %s index path %q: restricted descendant", deviceID.Short(), file.Name)
+		}
 		if !acl.Allows(deviceID, file.Name, true) && !(acl.Allows(deviceID, file.Name, false) && s.readonlyEcho(file)) {
 			return fmt.Errorf("ACL denied %s index path %q", deviceID.Short(), file.Name)
 		}
+	}
+	if err := acl.Check(); err != nil {
+		return err
 	}
 
 	s.cond.L.Lock()
