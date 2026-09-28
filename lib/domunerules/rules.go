@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -54,14 +55,16 @@ type gate struct {
 	current         *generation
 	epoch           atomic.Uint64
 	authorizedEpoch uint64
+	changed         chan struct{}
 }
 
 var gates sync.Map
+var ErrAuthorityRequired = errors.New("rule context requires fresh authority confirmation")
 
 func Enabled() bool { return os.Getenv("DOMUNE_RULES_DIR") != "" }
 func state(root string) *gate {
 	key := os.Getenv("DOMUNE_RULES_DIR") + "\x00" + root
-	g, _ := gates.LoadOrStore(key, &gate{})
+	g, _ := gates.LoadOrStore(key, &gate{changed: make(chan struct{})})
 	return g.(*gate)
 }
 func contextPath(root string) string {
@@ -217,7 +220,21 @@ func Apply(root string, raw []byte) error {
 	if next.needsAuthority() && g.epoch.Load() != epoch {
 		return fmt.Errorf("connection changed during rule confirmation")
 	}
+	close(g.changed)
+	g.changed = make(chan struct{})
 	return nil
+}
+
+// Changed closes after a fresh rule confirmation. Obtain it before checking
+// readiness so an Apply between the check and wait cannot be missed.
+func Changed(root string) <-chan struct{} {
+	if !Enabled() {
+		return nil
+	}
+	g := state(root)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.changed
 }
 
 type Lease struct {
@@ -234,7 +251,7 @@ func Acquire(root string) (*Lease, error) {
 	g.mu.RLock()
 	if g.current == nil {
 		g.mu.RUnlock()
-		return nil, fmt.Errorf("rule context requires fresh authority confirmation after startup")
+		return nil, fmt.Errorf("%w after startup", ErrAuthorityRequired)
 	}
 	lease := &Lease{gate: g, snapshot: g.current, epoch: g.authorizedEpoch}
 	if err := lease.Check(); err != nil {
@@ -254,7 +271,7 @@ func (l *Lease) Check() error {
 		return nil
 	}
 	if l.snapshot.needsAuthority() && l.gate.epoch.Load() != l.epoch {
-		return fmt.Errorf("rule context requires fresh authority confirmation after disconnect")
+		return fmt.Errorf("%w after disconnect", ErrAuthorityRequired)
 	}
 	return l.snapshot.check()
 }

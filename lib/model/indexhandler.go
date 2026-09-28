@@ -188,7 +188,7 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 	if err := s.waitWhilePaused(ctx); err != nil {
 		return err
 	}
-	err = s.sendIndexTo(ctx)
+	err = s.sendIndexWhenReady(ctx)
 
 	// Subscribe to LocalIndexUpdated (we have new information to send) and
 	// DeviceDisconnected (it might be us who disconnected, so we should
@@ -224,7 +224,7 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 			continue
 		}
 
-		err = s.sendIndexTo(ctx)
+		err = s.sendIndexWhenReady(ctx)
 
 		// Wait a short amount of time before entering the next loop. If there
 		// are continuous changes happening to the local index, this gives us
@@ -237,6 +237,32 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 	}
 
 	return err
+}
+
+// Missing or disconnected authority is a state to wait through on this
+// connection. Other errors still terminate the sender. Capture the change
+// channel before checking readiness to avoid missing an intervening Apply.
+func (s *indexHandler) sendIndexWhenReady(ctx context.Context) error {
+	for {
+		if err := s.waitWhilePaused(ctx); err != nil {
+			return err
+		}
+		rulesChanged := domunerules.Changed(s.folderRoot)
+		err := s.sendIndexTo(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, domunerules.ErrAuthorityRequired) {
+			return err
+		}
+		// Only batches acknowledged by the connection can advance the cursor.
+		s.localPrevSequence = s.sentPrevSequence
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-rulesChanged:
+		}
+	}
 }
 
 // resume might be called because the folder was actually resumed, or just
