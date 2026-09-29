@@ -225,8 +225,8 @@ func Apply(root string, raw []byte) error {
 	return nil
 }
 
-// Changed closes when a fresh rule confirmation is installed. Callers obtain
-// this channel before checking readiness so an intervening Apply cannot be lost.
+// Changed closes after a fresh rule confirmation. Obtain it before checking
+// readiness so an Apply between the check and wait cannot be missed.
 func Changed(root string) <-chan struct{} {
 	if !Enabled() {
 		return nil

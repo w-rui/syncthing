@@ -169,11 +169,11 @@ func TestDomuneIndexSenderRetriesUnsentReadAheadAfterInvalidation(t *testing.T) 
 		sent <- index.Files
 		return nil
 	})
-	handler := &indexHandler{conn: conn, folderRoot: root, folder: "probe", sdb: &invalidatingIndexDB{DB: database, root: root}, cond: sync.NewCond(new(sync.Mutex))}
+	handler := &indexHandler{conn: conn, folderRoot: root, folder: "probe", sdb: &invalidatingIndexDB{DB: database, root: root}, cond: sync.NewCond(new(sync.Mutex)), evLogger: events.NoopLogger}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- handler.sendIndexWhenReady(ctx) }()
+	go func() { done <- handler.Serve(ctx) }()
 	select {
 	case files := <-sent:
 		t.Fatalf("stale authority leaked unsent index: %+v", files)
@@ -194,13 +194,11 @@ func TestDomuneIndexSenderRetriesUnsentReadAheadAfterInvalidation(t *testing.T) 
 	case <-time.After(3 * time.Second):
 		t.Fatal("read-ahead recovery did not send file")
 	}
+	cancel()
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
+	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("sender did not complete recovered batch")
+		t.Fatal("sender did not stop after cancellation")
 	}
 }
 
@@ -221,10 +219,10 @@ func TestDomuneIndexSenderDoesNotWaitThroughInvalidRuleControl(t *testing.T) {
 	conn := &mocks.Connection{}
 	conn.DeviceIDReturns(device1)
 	conn.StringReturns("invalid controls")
-	handler := &indexHandler{conn: conn, folderRoot: root, folder: "probe", cond: sync.NewCond(new(sync.Mutex))}
+	handler := &indexHandler{conn: conn, folderRoot: root, folder: "probe", cond: sync.NewCond(new(sync.Mutex)), evLogger: events.NoopLogger}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := handler.sendIndexWhenReady(ctx); err == nil || err == context.DeadlineExceeded {
+	if err := handler.Serve(ctx); err == nil || err == context.DeadlineExceeded {
 		t.Fatalf("invalid rule control was treated as authority wait: %v", err)
 	}
 }
